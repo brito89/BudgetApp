@@ -5,8 +5,6 @@ tus tarjetas de crédito **Santander** y **HSBC** y la app los lee con OCR,
 extrae cada movimiento, lo categoriza y te muestra cuánto y en qué gastas
 **por mes calendario** — todo en tu PC, sin que tus datos salgan de ella.
 
-Licencia: [MIT](LICENSE).
-
 ---
 
 ## ✨ Qué hace

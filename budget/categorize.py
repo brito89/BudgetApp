@@ -7,7 +7,9 @@ con la descripcion (por orden de id) gana.
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from functools import lru_cache
 
 from budget.parsers.base import Transaction
 
@@ -122,12 +124,29 @@ def borrar_regla(con: sqlite3.Connection, regla_id: int) -> None:
     con.commit()
 
 
+@lru_cache(maxsize=512)
+def _patron_regex(patron: str) -> "re.Pattern[str]":
+    """Patron como regex con fronteras de palabra.
+
+    'REST' coincide en 'REST SUSHI ROLL' pero NO dentro de 'FLOREST'
+    (que no es un restaurante).
+    """
+    return re.compile(r"(?<![A-Z0-9])" + re.escape(patron) + r"(?![A-Z0-9])")
+
+
 def categorizar(desc: str, reglas_cache: list[tuple[str, str]] | None = None) -> str:
-    """Categoria para una descripcion segun las reglas (primera coincidencia)."""
+    """Categoria para una descripcion segun las reglas (primera coincidencia).
+
+    Primero se intentan los patrones respetando fronteras de palabra; si
+    nada coincide, se cae a la coincidencia simple como respaldo.
+    """
     if reglas_cache is None:
         con = _con_tmp()
         reglas_cache = [(r["categoria"], r["patron"]) for r in reglas(con)]
     d = _norm(desc)
+    for categoria, patron in reglas_cache:
+        if _patron_regex(patron).search(d):
+            return categoria
     for categoria, patron in reglas_cache:
         if patron in d:
             return categoria

@@ -69,12 +69,29 @@ CREATE TABLE IF NOT EXISTS importaciones (
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    # timeout + busy_timeout: espera hasta 30s por el bloqueo en vez de
+    # fallar al instante si otra pestaña/proceso esta escribiendo
+    con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row
-    con.executescript(SCHEMA)
+    con.execute("PRAGMA busy_timeout = 30000")
+    try:
+        con.execute("PRAGMA journal_mode = WAL")  # lecturas sin bloquear escritor
+    except sqlite3.OperationalError:
+        pass  # otro proceso cambio el modo de journaling; no es critico
+    con.execute("PRAGMA foreign_keys = ON")
+    _init(con)
+    return con
+
+
+def _init(con: sqlite3.Connection) -> None:
+    # crea el esquema solo la primera vez; en cada connect la inicializacion
+    # queda como lectura pura (no toma bloqueos de escritura)
+    tables = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "movimientos" not in tables:
+        con.executescript(SCHEMA)
     _migrar(con)
     _seed(con)
-    return con
 
 
 def _migrar(con: sqlite3.Connection) -> None:
@@ -103,8 +120,12 @@ def _migrar(con: sqlite3.Connection) -> None:
 
 
 def _seed(con: sqlite3.Connection) -> None:
-    from budget.categorize import seed_reglas
-    seed_reglas(con)
+    # si las reglas ya fueron sembradas, no tocar (evita un bloqueo de
+    # escritura en cada arranque de la app)
+    n = con.execute("SELECT COUNT(*) c FROM reglas_categoria").fetchone()["c"]
+    if n == 0:
+        from budget.categorize import seed_reglas
+        seed_reglas(con)
 
 
 def huella(t: Transaction) -> str:

@@ -7,8 +7,11 @@ por Tesseract OCR en espanol.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 import pytesseract
@@ -36,15 +39,16 @@ def render_pdf_pages(
 
     pages: rango 1-based (primera, ultima) inclusive. None = todas.
     Devuelve la lista de PNGs generados, en orden de pagina.
+
+    Cada render usa su propia subcarpeta temporal (con uuid) para que dos
+    importaciones simultaneas nunca compartan archivos ni choquen al
+    limpiar (Windows no permite borrar archivos en uso).
     """
     pdf_path = Path(pdf_path)
-    out_dir = Path(out_dir or (Path.home() / "AppData/Local/Temp/opencode/budgetapp_ocr"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = out_dir / pdf_path.stem.replace(" ", "_")
-
-    # Limpiar restos de corridas anteriores para no mezclar paginas viejas
-    for old in out_dir.glob(f"{prefix.name}*.png"):
-        old.unlink()
+    base = Path(out_dir or (Path.home() / "AppData/Local/Temp/opencode/budgetapp_ocr"))
+    sub = base / f"{pdf_path.stem.replace(' ', '_')}_{uuid.uuid4().hex[:8]}"
+    sub.mkdir(parents=True, exist_ok=True)
+    prefix = sub / "p"
 
     cmd = [PDFTOPPM_EXE, "-png", "-gray", "-r", str(dpi)]
     if pages:
@@ -54,9 +58,21 @@ def render_pdf_pages(
     subprocess.run(cmd, check=True, capture_output=True)
 
     # pdftoppm nombra con ceros a la izquierda segun el total de paginas
-    generated = sorted(out_dir.glob(f"{prefix.name}*.png"))
+    generated = sorted(sub.glob("p*.png"))
     if not generated:
         raise RuntimeError(f"pdftoppm no genero imagenes para {pdf_path.name}")
+
+    # limpieza best-effort de carpetas de renders anteriores (mas de 1 hora)
+    # sin fallar si otra renderizacion aun las esta usando
+    ahora = time.time()
+    for old in base.glob("*_*"):
+        if not old.is_dir() or old == sub:
+            continue
+        try:
+            if ahora - old.stat().st_mtime > 3600:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
     return generated
 
 

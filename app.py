@@ -33,6 +33,19 @@ def fmt(v) -> str:
     return f"$ {Decimal(v):,.2f}"
 
 
+MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+def nombre_mes(m: str) -> str:
+    """'2026-09' -> 'Septiembre 2026'."""
+    try:
+        y, mth = int(m[:4]), int(m[5:7])
+        return f"{MESES_ES[mth - 1].capitalize()} {y}"
+    except (ValueError, IndexError):
+        return m
+
+
 st.sidebar.title("💳 BudgetApp")
 st.sidebar.caption("Control de gastos · datos 100% locales")
 opcion = st.sidebar.radio("Menú", ["📥 Importar", "✍️ Gasto manual", "📋 Movimientos",
@@ -71,10 +84,11 @@ if opcion == "📥 Importar":
             st.error("La ruta no existe o no es un PDF")
 
     pendientes: list = st.session_state.setdefault("pendientes", [])
+    importados = st.session_state.setdefault("importados", {})  # nombre -> resumen
     ya_en_cola = {Path(p.archivo).name for p in pendientes}
 
     for p in paths:
-        if p.name in ya_en_cola:
+        if p.name in ya_en_cola or p.name in importados:
             continue
         with st.spinner(f"Analizando {p.name} (OCR)…"):
             pendientes.append(analizar_pdf(p))
@@ -82,6 +96,11 @@ if opcion == "📥 Importar":
     st.session_state["pendientes"] = pendientes
 
     if not pendientes:
+        if importados:
+            st.success("Importación guardada ✔ — los duplicados se ignoran "
+                       "automáticamente si vuelves a subir el mismo PDF.")
+            for nombre, resumen_imp in importados.items():
+                st.caption(f"✅ **{nombre}** — {resumen_imp}")
         st.info("Aún no hay estados de cuenta en cola.")
         st.stop()
 
@@ -120,8 +139,9 @@ if opcion == "📥 Importar":
             for previa in pendientes:
                 if not previa.guardado:
                     confirmar(previa, con)
+                    importados[Path(previa.archivo).name] = (
+                        f"{previa.nuevos} nuevos · {previa.duplicados} duplicados")
             st.session_state["pendientes"] = []
-            st.success("Importación guardada ✔")
             st.rerun()
     else:
         if st.button("Limpiar lista"):
@@ -173,6 +193,7 @@ elif opcion == "✍️ Gasto manual":
     else:
         vista = dfm.head(20)[["id", "mes", "fecha_operacion", "descripcion",
                               "monto_dec", "categoria"]].copy()
+        vista["mes"] = vista["mes"].map(nombre_mes)
         vista = vista.rename(columns={"monto_dec": "monto"})
         st.dataframe(
             vista, use_container_width=True, hide_index=True,
@@ -196,7 +217,9 @@ elif opcion == "📋 Movimientos":
                             for t in tarjetas_disponibles(con)]
 
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.5, 1.5])
-    sel_mes = c1.selectbox("Mes (gasto real)", ["Todos"] + meses)
+    sel_mes = c1.selectbox(
+        "Mes (gasto real)", ["Todos"] + meses,
+        format_func=lambda m: "Todos" if m == "Todos" else nombre_mes(m))
     sel_banco = c2.selectbox("Banco", BANCOS)
     sel_tarjeta = c3.selectbox("Tarjeta", tarjetas)
     sel_cat = c4.selectbox("Categoría", ["Todas"] + CATEGORIAS)
@@ -265,67 +288,15 @@ elif opcion == "📋 Movimientos":
 # ================================================================ CATEGORIAS
 
 elif opcion == "🧾 Categorías":
-    st.header("🧾 Reporte por categorías")
-
-    meses = ["Todos"] + meses_disponibles(con)
-    # por defecto: el ultimo mes calendario real (no meses futuros de cuotas)
-    hoy = date.today().strftime("%Y-%m")
-    reales = [m for m in meses[1:] if m <= hoy]
-    idx_default = meses.index(reales[0]) if reales else 0
-    sel = st.selectbox("Mes de gasto", meses, index=idx_default)
-
-    dfp = df_movimientos(con, mes=sel)
-    if dfp.empty:
-        st.info("Sin movimientos en este periodo.")
-        st.stop()
-
-    gastos = dfp[(dfp["monto_dec"] > 0) & (dfp["cuenta_gasto"] == 1)].copy()
-    gastos["monto_num"] = gastos["monto_dec"].astype(float)
-    gasto_total = gastos["monto_num"].sum()
-
-    por_cat = (gastos.groupby("categoria")["monto_num"]
-               .agg(["sum", "count"])
-               .reset_index()
-               .rename(columns={"sum": "monto", "count": "movimientos"})
-               .sort_values("monto", ascending=False))
-    por_cat["% del gasto"] = (por_cat["monto"] / gasto_total * 100).round(1)
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Gasto total",
-              fmt(gastos["monto_num"].sum()))
-    k2.metric("Abonos del periodo",
-              fmt(dfp[dfp["monto_dec"] < 0]["monto_dec"].sum()))
-    k3.metric("Categorías usadas", len(por_cat))
-
-    st.subheader("Distribución del gasto")
-    fig = px.pie(por_cat, values="monto", names="categoria", hole=0.45)
-    fig.update_traces(textposition="inside", texttemplate="%{label}<br>%{percent}")
-    st.plotly_chart(fig, use_container_width=True)
-
-    tabla = por_cat.copy()
-    st.dataframe(
-        tabla[["categoria", "monto", "movimientos", "% del gasto"]],
-        use_container_width=True, hide_index=True,
-        column_config={"monto": st.column_config.NumberColumn(
-            "monto", format="$ %.2f")})
-
-    st.subheader("Gasto por categoría, mes con mes")
-    ev = df_movimientos(con)
-    ev = ev[(ev["monto_dec"] > 0) & (ev["cuenta_gasto"] == 1)].copy()
-    ev["monto_num"] = ev["monto_dec"].astype(float)
-    piv = ev.pivot_table(index="mes", columns="categoria",
-                         values="monto_num", aggfunc="sum", fill_value=0)
-    st.bar_chart(piv)
-
-    # --------------------------- reglas
-    st.subheader("Reglas de categorización")
-    st.caption("Palabra clave → categoría. Se aplican en orden de creación "
-               "a las descripciones de los movimientos.")
+    st.header("🧾 Categorías y reglas")
+    st.caption("Palabra clave → categoría. Se aplican en orden de creación a "
+               "las descripciones de los movimientos. Al agregar o eliminar "
+               "una regla se recategoriza todo el histórico al instante.")
 
     rls = reglas(con)
     df_r = pd.DataFrame([{"id": r["id"], "patrón": r["patron"],
                           "categoría": r["categoria"]} for r in rls])
-    st.dataframe(df_r, use_container_width=True, hide_index=True, height=240)
+    st.dataframe(df_r, use_container_width=True, hide_index=True, height=420)
 
     with st.form("nueva_regla", border=True):
         c1, c2, c3 = st.columns([2, 2, 1])
@@ -366,7 +337,8 @@ else:
     hoy = date.today().strftime("%Y-%m")
     reales = [m for m in meses if m <= hoy]
     idx_default = meses.index(reales[0]) if reales else 0
-    sel = st.selectbox("Mes de gasto", meses, index=idx_default)
+    sel = st.selectbox("Mes de gasto", meses, index=idx_default,
+                       format_func=nombre_mes)
     dfp = df_movimientos(con, mes=sel)
 
     r = resumen(con, sel)
@@ -377,17 +349,46 @@ else:
               fmt(dfp[dfp["monto_dec"] < 0]["monto_dec"].sum()))
     k3.metric("Movimientos", len(dfp))
 
-    st.subheader("Por tarjeta")
-    st.dataframe(r, use_container_width=True, hide_index=True)
+    st.subheader("🥧 Distribución por categorías")
+    gastos = dfp[(dfp["monto_dec"] > 0) & (dfp["cuenta_gasto"] == 1)].copy()
+    gastos["monto_num"] = gastos["monto_dec"].astype(float)
+    if gastos.empty:
+        st.info("Sin gastos registrados en este mes.")
+        st.stop()
 
-    st.subheader("Gasto por comercio (top 15)")
-    cargos = dfp[(dfp["monto_dec"] > 0) & (dfp["cuenta_gasto"] == 1)].copy()
-    cargos["comercio"] = cargos["descripcion"].str.slice(0, 24)
-    cargos["monto_num"] = cargos["monto_dec"].astype(float)
-    top = cargos.groupby("comercio")["monto_num"].sum().nlargest(15)
-    st.bar_chart(top)
+    gasto_total = gastos["monto_num"].sum()
+    por_cat = (gastos.groupby("categoria")["monto_num"]
+               .agg(["sum", "count"])
+               .reset_index()
+               .rename(columns={"sum": "monto", "count": "movimientos"})
+               .sort_values("monto", ascending=False))
+    por_cat["% del gasto"] = (por_cat["monto"] / gasto_total * 100).round(1)
 
-    st.subheader("Evolución mensual")
+    fig = px.pie(por_cat, values="monto", names="categoria", hole=0.45)
+    fig.update_traces(textposition="inside", texttemplate="%{label}<br>%{percent}")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        por_cat[["categoria", "monto", "movimientos", "% del gasto"]],
+        use_container_width=True, hide_index=True,
+        column_config={"monto": st.column_config.NumberColumn(
+            "monto", format="$ %.2f")})
+
+    st.subheader("🛒 Comercios del mes")
+    cargos = gastos.copy()
+    cargos["comercio"] = cargos["descripcion"].str.slice(0, 30)
+    tabla_comercios = (cargos.groupby("comercio")["monto_num"]
+                       .agg(["sum", "count"])
+                       .reset_index()
+                       .rename(columns={"sum": "monto", "count": "movimientos"})
+                       .sort_values("monto", ascending=False))
+    st.dataframe(
+        tabla_comercios,
+        use_container_width=True, hide_index=True, height=360,
+        column_config={"monto": st.column_config.NumberColumn(
+            "monto", format="$ %.2f")})
+
+    st.subheader("📈 Evolución mensual")
     df_all = df_movimientos(con)
     df_all = df_all[df_all["cuenta_gasto"] == 1]
     df_all["monto_num"] = df_all["monto_dec"].astype(float)

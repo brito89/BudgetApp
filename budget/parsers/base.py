@@ -31,7 +31,18 @@ MESES = {
     "JUL": 7, "AGO": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DIC": 12,
 }
 
-AMOUNT_IN_TEXT_RE = re.compile(r"\d{1,3}(?:,\d{3})*\.\d{2}")
+AMOUNT_IN_TEXT_RE = re.compile(r"\d{1,3}(?:,\d{3})*[.,]\d{2}")
+
+
+def _normaliza_cifra(cifra: str) -> str:
+    """Normaliza lecturas OCR con coma decimal: '25,496,84' -> '25496.84'.
+
+    '166,028.14' (punto decimal) queda intacto.
+    """
+    if "." not in cifra and "," in cifra and len(cifra.rsplit(",", 1)[-1]) == 2:
+        cabeza, cola = cifra.rsplit(",", 1)
+        return cabeza.replace(",", "") + "." + cola
+    return cifra
 
 
 # ---------------------------------------------------------------- modelo
@@ -319,6 +330,8 @@ def parse_amount_lenient(text: str) -> Optional[Decimal]:
     s = re.sub(r"[^0-9.,]", "", s)
     if not s:
         return None
+    if "." not in s and "," in s:
+        s = _normaliza_cifra(s)
     if "." not in s and "," not in s and len(s) > 2:
         s = s[:-2] + "." + s[-2:]  # el OCR perdio el punto decimal
     else:
@@ -350,6 +363,11 @@ def clean_description(text: str) -> str:
 class _TotalRec:
     keyword: str  # cargos | abonos
     amount: Decimal
+
+
+# Descripciones que SIEMPRE son abonos (aunque el OCR pierda el signo):
+# usar el saldo de cashback, devoluciones y reembolsos reducen la deuda
+ABONOS_FORZADOS = ("USO DE SALDO", "DEVOLUCION", "REEMBOLSO")
 
 
 class StatementParser:
@@ -409,7 +427,23 @@ class StatementParser:
                     if amts:
                         line_total_recs.append(
                             _TotalRec(tm.group(1).lower(),
-                                      Decimal(amts[-1].replace(",", ""))))
+                                      Decimal(_normaliza_cifra(amts[-1])
+                                              .replace(",", ""))))
+                else:
+                    # formatos viejos: caja de resumen con letras
+                    # 'A) PAGOS Y ABONOS - $166,028.14'
+                    # 'B) CARGOS REGULARES (NO A MESES) + $21,226.84'
+                    # el monto debe venir pegado a la frase (para no confundir
+                    # con la caja de distribucion multi-columna)
+                    for kw, rex in (("abonos", r"PAGOS\s+Y\s+ABONOS\D{0,12}"),
+                                    ("cargos", r"CARGOS REGULARES\D{0,25}")):
+                        m2 = re.search(rex, u)
+                        if m2:
+                            amts = AMOUNT_IN_TEXT_RE.findall(u[m2.start():])
+                            if amts:
+                                cifra = _normaliza_cifra(amts[0])
+                                line_total_recs.append(
+                                    _TotalRec(kw, Decimal(cifra.replace(",", ""))))
 
             if seg_kind and seg_card[0]:
                 close_segment(page_h - 40)
@@ -445,19 +479,15 @@ class StatementParser:
             ref_year = date.today().year
 
         result = ParseResult(tables=tables)
-        # totales: la linea completa de texto suele leerse mejor que las
-        # celdas fragmentadas de la fila de totales; preferirla por keyword
-        by_kw_line = {}
-        for r in line_total_recs:
-            by_kw_line.setdefault(r.keyword, r.amount)
-        by_kw_grid = {}
-        for r in total_recs:
-            by_kw_grid.setdefault(r.keyword, r.amount)
-        for kw in ("cargos", "abonos"):
-            amt = by_kw_line.get(kw, by_kw_grid.get(kw))
-            if amt is not None:
-                mag = abs(amt)
-                result.totals.append((kw, mag if kw == "cargos" else -mag))
+        # totales: recolectar TODOS los candidatos (por celda y por linea);
+        # la validacion acepta si la suma cuadra con cualquiera de ellos
+        vistos: set[tuple[str, Decimal]] = set()
+        for r in list(total_recs) + list(line_total_recs):
+            mag = abs(r.amount)
+            val = mag if r.keyword == "cargos" else -mag
+            if (r.keyword, val) not in vistos:
+                vistos.add((r.keyword, val))
+                result.totals.append((r.keyword, val))
 
         for t in tables:
             for row in t.rows:
@@ -525,6 +555,8 @@ class StatementParser:
         desc = clean_description(desc)
         if not desc:
             return None
+        if monto > 0 and any(k in desc.upper() for k in ABONOS_FORZADOS):
+            monto = -monto  # semantica: el uso de saldo/devolucion es abono
         return Transaction(
             section="regular", fecha_operacion=fecha, fecha_cargo=fecha_cargo,
             descripcion=desc, monto=monto,

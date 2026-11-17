@@ -1,0 +1,9 @@
+# Entorno y cachés
+.venv/
+__pycache__/
+*.pyc
+
+# DATOS PERSONALES - nunca al repositorio
+data/
+scripts/extracted_*.csv
+scripts/hsbc_300_psm6.txt

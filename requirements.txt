@@ -1,0 +1,6 @@
+pillow>=13.0
+pytesseract>=0.3.13
+numpy>=2.0
+pandas>=2.0
+streamlit>=1.40
+plotly>=6.0
